@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keystone - Data (RDS MySQL)
+
+Parameters:
+  EnvName:
+    Type: String
+  VpcId:
+    Type: String
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: Using public subnets for simplicity (no NAT). RDS will still be non-public.
+  DBName:
+    Type: String
+    Default: keystone_db
+  DBUsername:
+    Type: String
+    Default: keystone_user
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+
+Resources:
+  # Subnet group can be public subnets here for demo (RDS is still not publicly accessible)
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds: !Ref PublicSubnetIds
+      DBSubnetGroupName: !Sub ${EnvName}-db-subnets
+
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: MySQL params
+      Family: mysql8.0
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${EnvName}-mysql
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBName: !Ref DBName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      StorageType: gp2
+      BackupRetentionPeriod: 7
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      VPCSecurityGroups: []
+      DBParameterGroupName: !Ref DBParameterGroup
+      EnableIAMDatabaseAuthentication: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvName}-mysql
+
+Outputs:
+  DBEndpoint:
+    Value: !GetAtt RDSInstance.Endpoint.Address
