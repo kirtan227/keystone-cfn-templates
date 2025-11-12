@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keystone - Compute (ALB, Target Group, ASG, Warm Pool)
+
+Parameters:
+  EnvName:
+    Type: String
+  VpcId:
+    Type: String
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+  AlbSecurityGroupId:
+    Type: String
+  Ec2SecurityGroupId:
+    Type: String
+  InstanceProfileArn:
+    Type: String
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  KeyName:
+    Type: String
+    Default: ''
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+  MinSize:
+    Type: Number
+    Default: 2
+  MaxSize:
+    Type: Number
+    Default: 5
+
+Conditions:
+  UseKey: !Not [ !Equals [ !Ref KeyName, '' ] ]
+
+Resources:
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvName}-alb
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups: [ !Ref AlbSecurityGroupId ]
+      Scheme: internet-facing
+      Type: application
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvName}-tg
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200
+
+  ListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvName}-lt
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !Ref InstanceProfileArn
+        ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}'
+        InstanceType: !Ref InstanceType
+        KeyName: !If [ UseKey, !Ref KeyName, !Ref "AWS::NoValue" ]
+        SecurityGroupIds: [ !Ref Ec2SecurityGroupId ]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            yum update -y
+            yum install -y httpd
+            systemctl enable httpd
+            cat >/var/www/html/index.html <<'EOF'
+            <html>
+             <head><title>Keystone Cloud Demo</title></head>
+             <body style="font-family: sans-serif;">
+              <h2>Welcome to Keystone Parts Distribution Cloud Demo</h2>
+              <p>Deployed via CloudFormation Launch Template + ASG + ALB.</p>
+             </body>
+            </html>
+            EOF
+            systemctl start httpd
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${EnvName}-asg
+      VPCZoneIdentifier: !Ref PublicSubnetIds
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs: [ !Ref TargetGroup ]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MetricsCollection:
+        - Granularity: '1Minute'
+
+  WarmPool:
+    Type: AWS::AutoScaling::WarmPool
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      MinSize: 1
+      PoolState: Stopped
+
+Outputs:
+  AlbDNSName:
+    Value: !GetAtt LoadBalancer.DNSName
+  LoadBalancerArn:
+    Value: !Ref LoadBalancer
+  TargetGroupArn:
+    Value: !Ref TargetGroup
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
