@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keystone - Security (SGs + EC2 instance profile)
+
+Parameters:
+  EnvName:
+    Type: String
+  VpcId:
+    Type: String
+  AllowedHTTPIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+
+Resources:
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from internet to ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedHTTPIngressCidr
+      Tags: [{ Key: Name, Value: !Sub ${EnvName}-alb-sg }]
+
+  Ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from ALB to EC2
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags: [{ Key: Name, Value: !Sub ${EnvName}-ec2-sg }]
+
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Tags: [{ Key: Name, Value: !Sub ${EnvName}-ec2-role }]
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref Ec2Role ]
+      InstanceProfileName: !Sub ${EnvName}-ec2-profile
+
+Outputs:
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+  Ec2SecurityGroupId:
+    Value: !Ref Ec2SecurityGroup
+  InstanceProfileArn:
+    Value: !GetAtt Ec2InstanceProfile.Arn
