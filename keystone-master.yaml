@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keystone Master - Orchestrates nested stacks (network, security, data, compute, serverless, monitoring)
+
+Parameters:
+  TemplateBucket:
+    Type: String
+    Description: S3 bucket that holds nested templates
+  TemplatePrefix:
+    Type: String
+    Description: Key prefix/folder inside the template bucket (e.g., v1)
+  EnvName:
+    Type: String
+    Default: dev
+    Description: Environment name (dev/stage/prod)
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+  AllowedHTTPIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to access HTTP/80 (0.0.0.0/0 for public)
+  KeyName:
+    Type: String
+    Default: ''
+    Description: Optional EC2 KeyPair name (leave blank to disable SSH)
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+  MinSize:
+    Type: Number
+    Default: 2
+  MaxSize:
+    Type: Number
+    Default: 5
+  DBName:
+    Type: String
+    Default: keystone_db
+  DBUsername:
+    Type: String
+    Default: keystone_user
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: MySQL password (min 8 chars)
+  TopicEmail:
+    Type: String
+    Description: Email to subscribe to SNS for serverless notifications
+  AlarmEmail:
+    Type: String
+    Description: Email for CloudWatch alarm notifications
+  InvoicesBucketName:
+    Type: String
+    Default: keystone-invoices
+    Description: S3 bucket name for invoices (must be globally unique if creating new)
+
+Mappings:
+  TemplatePaths:
+    Files:
+      Network: 00-network.yaml
+      Security: 01-security.yaml
+      Data: 02-data.yaml
+      Compute: 03-compute.yaml
+      Serverless: 04-serverless.yaml
+      Monitoring: 05-monitoring.yaml
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplatePrefix}/${TemplatePaths.Files.Network}
+      Parameters:
+        EnvName: !Ref EnvName
+        VpcCidr: !Ref VpcCidr
+        PublicSubnet1Cidr: !Ref PublicSubnet1Cidr
+        PublicSubnet2Cidr: !Ref PublicSubnet2Cidr
+
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplatePrefix}/${TemplatePaths.Files.Security}
+      Parameters:
+        EnvName: !Ref EnvName
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        AllowedHTTPIngressCidr: !Ref AllowedHTTPIngressCidr
+
+  DataStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplatePrefix}/${TemplatePaths.Files.Data}
+      Parameters:
+        EnvName: !Ref EnvName
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetIds: !GetAtt NetworkStack.Outputs.PublicSubnetIds
+        DBName: !Ref DBName
+        DBUsername: !Ref DBUsername
+        DBPassword: !Ref DBPassword
+
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - SecurityStack
+      - DataStack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplatePrefix}/${TemplatePaths.Files.Compute}
+      Parameters:
+        EnvName: !Ref EnvName
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetIds: !GetAtt NetworkStack.Outputs.PublicSubnetIds
+        AlbSecurityGroupId: !GetAtt SecurityStack.Outputs.AlbSecurityGroupId
+        Ec2SecurityGroupId: !GetAtt SecurityStack.Outputs.Ec2SecurityGroupId
+        InstanceProfileArn: !GetAtt SecurityStack.Outputs.InstanceProfileArn
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        DesiredCapacity: !Ref DesiredCapacity
+        MinSize: !Ref MinSize
+        MaxSize: !Ref MaxSize
+
+  ServerlessStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - DataStack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplatePrefix}/${TemplatePaths.Files.Serverless}
+      Parameters:
+        EnvName: !Ref EnvName
+        InvoicesBucketName: !Ref InvoicesBucketName
+        TopicEmail: !Ref TopicEmail
+
+  MonitoringStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - ComputeStack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplatePrefix}/${TemplatePaths.Files.Monitoring}
+      Parameters:
+        EnvName: !Ref EnvName
+        AlarmEmail: !Ref AlarmEmail
+        LoadBalancerArn: !GetAtt ComputeStack.Outputs.LoadBalancerArn
+        TargetGroupArn: !GetAtt ComputeStack.Outputs.TargetGroupArn
+        AutoScalingGroupName: !GetAtt ComputeStack.Outputs.AutoScalingGroupName
+
+Outputs:
+  AlbDNSName:
+    Value: !GetAtt ComputeStack.Outputs.AlbDNSName
+  RDSEndpoint:
+    Value: !GetAtt DataStack.Outputs.DBEndpoint
+  InvoicesBucket:
+    Value: !GetAtt ServerlessStack.Outputs.InvoicesBucketName
