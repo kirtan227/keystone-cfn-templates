@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keystone - Serverless (S3 trigger -> Lambda -> SNS)
+
+Parameters:
+  EnvName:
+    Type: String
+  InvoicesBucketName:
+    Type: String
+    Description: Must be globally unique if bucket is new
+  TopicEmail:
+    Type: String
+
+Resources:
+  InvoicesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref InvoicesBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvName}-invoices-bucket
+
+  OpsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${EnvName}-invoice-upload-alerts
+
+  OpsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OpsTopic
+      Protocol: email
+      Endpoint: !Ref TopicEmail
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-logs-sns
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref OpsTopic
+      Tags: [{ Key: Name, Value: !Sub ${EnvName}-lambda-role }]
+
+  UploadNotifier:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvName}-invoice-upload-notifier
+      Role: !GetAtt LambdaRole.Arn
+      Handler: index.lambda_handler
+      Runtime: python3.11
+      Timeout: 10
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref OpsTopic
+      Code:
+        ZipFile: |
+          import boto3, os, json, datetime
+          from urllib.parse import unquote_plus
+          sns = boto3.client('sns')
+          TOPIC_ARN = os.environ['TOPIC_ARN']
+          def lambda_handler(event, context):
+              for record in event.get('Records', []):
+                  s3info = record.get('s3', {})
+                  bucket = s3info.get('bucket', {}).get('name')
+                  obj = s3info.get('object', {})
+                  key = unquote_plus(obj.get('key', ''))
+                  size = obj.get('size', 0)
+                  uploaded_at = datetime.datetime.utcnow().isoformat() + "Z"
+                  msg = {
+                      "bucket": bucket,
+                      "file_name": key,
+                      "size": size,
+                      "uploaded_at": uploaded_at
+                  }
+                  sns.publish(
+                      TopicArn=TOPIC_ARN,
+                      Message=json.dumps(msg),
+                      Subject=f"New file uploaded: {key}"
+                  )
+              return {"status": "success"}
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UploadNotifier
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt InvoicesBucket.Arn
+
+  BucketNotification:
+    Type: AWS::S3::BucketNotification
+    Properties:
+      Bucket: !Ref InvoicesBucket
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt UploadNotifier.Arn
+    DependsOn:
+      - LambdaInvokePermission
+      - UploadNotifier
+
+Outputs:
+  InvoicesBucketName:
+    Value: !Ref InvoicesBucket
+  TopicArn:
+    Value: !Ref OpsTopic
