@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Keystone - Monitoring (CloudWatch alarms + SNS for alarms)
+
+Parameters:
+  EnvName:
+    Type: String
+  AlarmEmail:
+    Type: String
+  LoadBalancerArn:
+    Type: String
+  TargetGroupArn:
+    Type: String
+  AutoScalingGroupName:
+    Type: String
+
+Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${EnvName}-alarm-topic
+
+  AlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  AlbLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvName}-ALB-High-Latency
+      AlarmDescription: p95 latency > 0.25s for 5 mins
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select [1, !Split ["/", !Ref TargetGroupArn]]
+        - Name: LoadBalancer
+          Value: !Select [1, !Split ["/", !Ref LoadBalancerArn]]
+      Statistic: p95
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 0.25
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [ !Ref AlarmTopic ]
+      OKActions: [ !Ref AlarmTopic ]
+
+  AsgGroupMinSizeLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvName}-ASG-Desired-Capacity-0
+      AlarmDescription: ASG Desired capacity unexpectedly 0 (safety)
+      Namespace: AWS/AutoScaling
+      MetricName: GroupDesiredCapacity
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroupName
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0.5
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [ !Ref AlarmTopic ]
+      OKActions: [ !Ref AlarmTopic ]
+
+Outputs:
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic
